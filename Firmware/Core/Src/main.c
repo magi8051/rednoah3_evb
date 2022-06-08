@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "ae_i2c.h"
+#include "boot_loader.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -49,7 +50,6 @@ ADC_HandleTypeDef hadc1;
 DAC_HandleTypeDef hdac;
 
 I2C_HandleTypeDef hi2c1;
-I2C_HandleTypeDef hi2c2;
 
 SPI_HandleTypeDef hspi3;
 SPI_HandleTypeDef hspi5;
@@ -69,7 +69,7 @@ struct uart_packet s_upk;      // uart buffer
 struct rtp_packet s_rtp;       // rtp buffer
 
 /*board info*/
-u32 g_board_info;
+u8 g_board_info;
 u8 g_ic_info;
 
 /*boot pv*/
@@ -126,7 +126,6 @@ static void MX_TIM7_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_I2C1_Init(void);
-static void MX_I2C2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -138,6 +137,20 @@ PUTCHAR_PROTOTYPE
 {
   HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, 0xFFFF);
   return ch;
+}
+
+/**************************************************************************
+Function 	: Boot Loader Funtion for Firmware Update
+Version 	: 1.0
+Descript 	: Flash Vector Jump
+IROM1 		: Start(0x8000000), Size(0x180000)
+***************************************************************************/
+void jump_vector_table(void)
+{
+  jmp_address = *(__IO uint32_t *)(BBB_FLASH_SECTOR + 4);
+  jmp_to_application = (pFunction)jmp_address;
+  __set_MSP(*(__IO uint32_t *)BBB_FLASH_SECTOR);
+  jmp_to_application();
 }
 
 /* Macro Data Conversion Function */
@@ -168,8 +181,6 @@ void _16u8(u16 *_u16, u8 *_u8)
 
 /***************************************************************************
 Function	: uart_transfer_task
-Date      : 2021.08.12
-Editor		: JKS
 Version		: 1.0
 Descript 	:
 ***************************************************************************/
@@ -187,40 +198,56 @@ void uart_transfer_task(u32 tx_size)
   {
     s_upk.buf[4] += s_upk.buf[6 + i];
   }
+
+  LED5_T;
   HAL_UART_Transmit_DMA(&huart1, (u8 *)s_upk.buf, tx_size + BHD6);
   // HAL_UART_Transmit_IT(&huart1,(u8*)s_upk.buf, txsize + BHD6);
 }
 
 static void device_info_request(void)
 {
-  u8 clk, pin;
+  volatile u8 pin, size, i;
 
+  i = 0;
   pin = i2c_pin_state();
 
   /*step: sw version*/
-  s_upk.buf[0x06] = 0x00; // board
-  s_upk.buf[0x07] = 0x00; // info
-  s_upk.buf[0x08] = (u8)(REDNOAH_FW_INFO >> 24);
-  s_upk.buf[0x09] = (u8)(REDNOAH_FW_INFO >> 16);
-  s_upk.buf[0x0A] = (u8)(REDNOAH_FW_INFO >> 8);
-  s_upk.buf[0x0B] = (u8)(REDNOAH_FW_INFO >> 0);
+  s_upk.buf[6] = 0;
+  s_upk.buf[7] = 0;
+  s_upk.buf[8] = (u8)(REDNOAH_FW_INFO >> 24);
+  s_upk.buf[9] = (u8)(REDNOAH_FW_INFO >> 16);
+  s_upk.buf[10] = (u8)(REDNOAH_FW_INFO >> 8);
+  s_upk.buf[11] = (u8)(REDNOAH_FW_INFO >> 0);
 
+  /* i2c pin setting error */
   if (pin != 3)
   {
     s_upk.buf[12] = 0xff;
     s_upk.buf[13] = pin;
     s_upk.buf[14] = 0;
     s_upk.buf[15] = 0;
-    s_upk.dev_num = 1;
+    size = 7;
   }
-  g_i2c_clk = clk;
-  uart_transfer_task(7);
+  else
+  {
+    for (g_i2c_id = 0; g_i2c_id < 200; g_i2c_id += 2)
+    {
+      if (i2c_write_task(g_i2c_id, 0, 1, &g_i2c_id, 1, I2C_400KHZ) == I2C_ACK)
+      {
+        s_upk.buf[12]++;
+        s_upk.buf[13 + i] = g_i2c_id;
+        s_upk.buf[14 + i] = i2c_8bit_r(0x00);
+        i += 2;
+      }
+    }
+    size = 7 + s_upk.buf[12] * 2;
+  }
+
+  uart_transfer_task(size);
 }
 
 /***************************************************************************
 Function	: board_set_task
-Date      : 2021.08.12
-Editor		: JKS
 Version		: 1.0
 Descript 	: chip info, reset, who am i
 ***************************************************************************/
@@ -231,17 +258,21 @@ static void board_set_task(void)
   case 0x00: /*board info */
     device_info_request();
     break;
+
   case 0x01: /*device info*/
     g_ic_info = s_upk.buf[8];
     g_i2c_id = s_upk.buf[9];
     if (s_upk.buf[5])
       uart_transfer_task(1); // echo
     break;
+
   case 0x02: /*board reset */
     REDNOAH_RESET;
     break;
+
   case 0x03: /*ldo control */
     break;
+
   case 0x04: /* find auto i2c id */
     s_upk.buf[8] = 0;
     for (u8 id = 1; id < 119; id++)
@@ -254,11 +285,12 @@ static void board_set_task(void)
     }
     uart_transfer_task(3 + s_upk.buf[8]); // do not change!
     break;
+
   case 0xFA: /*firmware update*/
     if (s_upk.buf[8] == 0x01)
     {
-      // bootloader_update_task();
-      // jump_vector_table();
+      bootloader_update_task();
+      jump_vector_table();
     }
     break;
   }
@@ -266,8 +298,6 @@ static void board_set_task(void)
 
 /***************************************************************************
 Function  : sys_timer_set
-Date      : 2021.08.12
-Editor    : JKS
 Version		: 1.0
 Descript 	: timer control tick base is usec
 ***************************************************************************/
@@ -312,8 +342,6 @@ static void sys_timer_set(u32 timer, u32 mode, u32 usec)
 
 /***************************************************************************
 Function	: init_rednoah_platform_board
-Date      : 2021.08.12
-Editor		: JKS
 Version		: 1.0
 Descript 	: init function
 ***************************************************************************/
@@ -321,8 +349,8 @@ static void init_redhoah_system(void)
 {
 
   /*Auto board check*/
-  // u8 num;
-  // num = (BOOT_ID2 << 2) | (BOOT_ID1 << 1) | (BOOT_ID0 << 0);
+  HAL_Delay(100);
+  s_upk.hw = (BOOT_ID2 << 2) | (BOOT_ID1 << 1) | (BOOT_ID0 << 0);
 
   /*gpio i2c init start*/
   g_i2c_clk = g_i2c_info[1]; /* set 1mhz */
@@ -333,14 +361,7 @@ static void init_redhoah_system(void)
   // HAL_UART_Receive_DMA(&huart1, &s_upk.get, 1);
 
   /*LDO power on*/
-  LDO_EN(1); /* ADJ LDO Enable */
-
-  /* WBB LDO Pin for test */
-  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_13, 1);
-  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_14, 1);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, 1);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, 1);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
+  ADJ_LDO_EN(1); /* ADJ LDO Enable */
 
   device_info_request();
 
@@ -350,47 +371,56 @@ static void init_redhoah_system(void)
 
 /***************************************************************************
 Function	: tick_led_task
-Date		  : 2021.08.12
-Editor		: JKS
 Version		: 1.0
 Descript 	: led blink tick 10ms
 ***************************************************************************/
 static void sys_led_task(void)
 {
-  static u32 tick;
+  volatile static u32 t1, t2, n;
 
-  tick++;
+  t1++;
 
-  if (tick > 25)
+  if (t1 > 20)
   {
-    tick = 0;
-    HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_9); /*LED2*/
+    t1 = 0;
+    LED4_T;
   }
-}
 
-/***************************************************************************
-Function	: echo_i2c_msg
-Date      : 2021.08.12
-Editor		: JKS
-Version		: 1.0
-Descript 	: i2c task message
-***************************************************************************/
-void echo_i2c_msg(u8 msg)
-{
-  s_upk.buf[7] = msg;
-  uart_transfer_task(2);
-  if (msg == 0xff)
+  if (s_bit.rtp_act)
   {
-  }
-  else
-  {
+    if (t2 > 10)
+    {
+      n++;
+      t2 = 0;
+      if (n == 1)
+      {
+        LED1(LEDON);
+        LED2(LEDOF);
+        LED3(LEDOF);
+      }
+      else if (n == 2)
+      {
+        LED1(LEDOF);
+        LED2(LEDON);
+        LED3(LEDOF);
+      }
+      else if (n == 3)
+      {
+        n = 0;
+        LED1(LEDOF);
+        LED2(LEDOF);
+        LED3(LEDON);
+      }
+    }
+    else
+    {
+      t2++;
+    }
   }
 }
 
 /***************************************************************************
 Function	: i2c task
-Date      : 2021.10.01
-Editor		: JKS
 Version		: 1.2
 Descript 	: i2c r/w event
 ***************************************************************************/
@@ -418,7 +448,8 @@ static void i2c_task(void)
   {
     if (new_i2c_write_task(g_i2c_id, (u8 *)s_upk.buf + 12, asize, g_i2c_clk) != I2C_ACK)
     {
-      echo_i2c_msg(0xff);
+      s_upk.buf[7] = 0xff;
+      uart_transfer_task(2);
     }
     else
     {
@@ -430,12 +461,13 @@ static void i2c_task(void)
   {
     if (new_i2c_write_task(g_i2c_id, (u8 *)s_upk.buf + 12, dsize + asize, g_i2c_clk) != I2C_ACK)
     {
-      echo_i2c_msg(0xff);
+      s_upk.buf[7] = 0xff;
     }
     else
     {
-      echo_i2c_msg(0x00);
+      s_upk.buf[7] = 0x00;
     }
+    uart_transfer_task(2);
   }
 
   g_i2c_clk = clk;
@@ -444,11 +476,21 @@ static void i2c_task(void)
   scope = 0;
 }
 
+/***************************************************************************
+Function	: i2c byte write
+Version		: 1.0
+Descript 	: 8bit addr, data format
+***************************************************************************/
 u8 i2c_8bit_w(u8 addr, u8 data)
 {
   return i2c_write_task(g_i2c_id, addr, I2C_8BIT, &data, 1, g_i2c_clk);
 }
 
+/***************************************************************************
+Function	: i2c byte read
+Version		: 1.0
+Descript 	: 8bit addr, data format
+***************************************************************************/
 u8 i2c_8bit_r(u8 addr)
 {
   u8 data;
@@ -456,9 +498,15 @@ u8 i2c_8bit_r(u8 addr)
   return data;
 }
 
+/***************************************************************************
+Function	: init rtp task
+Version		: 1.0
+Descript 	: DW7800, DW7912, DW7914 rtp setup
+***************************************************************************/
 int init_rtp_task(void)
 {
   static u8 p;
+  u16 time;
 
   /* basic setup */
   if (s_upk.buf[8] == PLAY)
@@ -487,14 +535,20 @@ int init_rtp_task(void)
     /* device setup */
     if (s_rtp.dev == DW7800)
     {
-      g_i2c_id = 0xB2;
-      g_i2c_clk = I2C_1MHZ;
+      time = 5000;
     }
     else if (s_rtp.dev == DW7912)
     {
+      /* for test set value */
+      time = 5000;
+      // g_i2c_id = 0xB2;
+      i2c_8bit_w(0x03, 0x00); /* RTP */
+      // i2c_8bit_w(0x08, 0xEA); /* VD-CLAMP 3.6 */
     }
     else if (s_rtp.dev == DW7914)
     {
+      time = 5000;
+      i2c_8bit_w(0x0B, 0x00); /* RTP */
     }
   }
   else /* stop */
@@ -502,16 +556,21 @@ int init_rtp_task(void)
     if (s_rtp.dev == DW7800)
     {
       /* dw7800 sw reset */
-      i2c_8bit_w(0x05, 0x01);
+      // i2c_8bit_w(0x05, 0x01);
     }
     else if (s_rtp.dev == DW7912)
     {
+      /* play stop & fifo fulsh */
+      i2c_8bit_w(0x09, 0x00);
     }
     else if (s_rtp.dev == DW7914)
     {
+      i2c_8bit_w(0x0C, 0x00);
     }
+
+    /* timer stop */
     s_bit.rtp_act = 0;
-    sys_timer_set(TIMER_7, STOP, 5000); /* Stop 5ms timer */
+    sys_timer_set(TIMER_7, STOP, 0); /* stop timer */
 
     /* for hand shake */
     s_upk.buf[8] = 0xff;
@@ -521,45 +580,92 @@ int init_rtp_task(void)
   /* is first time run?*/
   if (s_rtp.play > 0)
   {
-    sys_timer_set(TIMER_7, PLAY, 5000); /* Play 5ms timer */
+    sys_timer_set(TIMER_7, PLAY, time); /* start timer */
   }
 
   return 0;
 }
 
+/***************************************************************************
+Function	: play rtp task
+Version		: 1.0
+Descript 	: stream data for real time play
+***************************************************************************/
 int play_rtp_task(void)
 {
-  u8 fifo;
-  u16 play;
+  u8 buf[2];
+  u16 fifo, play;
   static u8 echo, p;
 
-  /* stop play */
-  if (!s_bit.rtp_act)
+  if (s_rtp.play && s_bit.rtp_act)
   {
-    p = 0;
-    echo = 0;
-    return 0;
-  }
-
-  if (s_rtp.dev == DW7800)
-  {
-    /* step : check fifo */
-    fifo = i2c_8bit_r(0x03);
-
-    if (fifo < 127)
+    /* DW7800 */
+    if (s_rtp.dev == DW7800)
     {
-      /* what if fifo is empty?*/
-      if (s_rtp.size[p] > s_rtp.cnt[p]) /*  */
+      /* step : check fifo */
+      fifo = i2c_8bit_r(0x03);
+
+      if (fifo < 127)
       {
-        play = 127 - fifo;
+        /* what if fifo is empty?*/
+        if (s_rtp.size[p] > s_rtp.cnt[p])
+        {
+          play = 127 - fifo;
+
+          if (play > (s_rtp.size[p] - s_rtp.cnt[p]))
+          {
+            play = s_rtp.size[p] - s_rtp.cnt[p];
+          }
+
+          i2c_write_task(g_i2c_id, 0x04, I2C_8BIT, ((u8 *)s_rtp.buf[p] + s_rtp.cnt[p]), play, I2C_1MHZ);
+          s_rtp.cnt[p] += play;
+
+          if (s_rtp.size[p] == s_rtp.cnt[p])
+          {
+            p ^= 1;
+            echo = 0;
+            s_rtp.play--;
+            s_rtp.cnt[p] = 0;
+          }
+
+          /* hand shake */
+          if (echo == 0)
+          {
+            echo = 1;
+            _16u8(&s_rtp.cnt[p], s_upk.buf + 9);
+            uart_transfer_task(5);
+          }
+        }
+      }
+    }
+
+    /* DW7912 */
+    else if (s_rtp.dev == DW7912)
+    {
+      /* step : check fifo */
+      fifo = i2c_8bit_r(0x0A);
+
+      /* what if fifo is empty?*/
+      if (s_rtp.size[p] > s_rtp.cnt[p])
+      {
+        play = 2048 - (fifo * 64 + 64);
 
         if (play > (s_rtp.size[p] - s_rtp.cnt[p]))
         {
           play = s_rtp.size[p] - s_rtp.cnt[p];
         }
 
-        i2c_write_task(g_i2c_id, 0x04, I2C_8BIT, ((u8 *)s_rtp.buf[p] + s_rtp.cnt[p]), play, g_i2c_clk);
+        i2c_write_task(g_i2c_id, 0x0A, I2C_8BIT, ((u8 *)s_rtp.buf[p] + s_rtp.cnt[p]), play, I2C_2MHZ);
+        i2c_8bit_w(0x09, 0x01);
         s_rtp.cnt[p] += play;
+
+        if (s_rtp.size[p] == s_rtp.cnt[p])
+        {
+          p ^= 1;
+          echo = 0;
+          s_rtp.play--;
+          s_rtp.cnt[p] = 0;
+        }
 
         /* hand shake */
         if (echo == 0)
@@ -569,39 +675,57 @@ int play_rtp_task(void)
           uart_transfer_task(5);
         }
       }
-      else
-      {
-        s_rtp.play--;
-
-        if (s_rtp.play == 0)
-        {
-          /* play end */
-          p = 0;
-          echo = 0;
-          s_bit.rtp_act = 0;
-          sys_timer_set(TIMER_7, STOP, 0);
-
-          /* for hand shake */
-          s_upk.buf[8] = 0xff;
-          uart_transfer_task(5);
-        }
-        else
-        {
-          /* play continue */
-          p ^= 1;
-          echo = 0;
-          s_rtp.cnt[p] = 0;
-        }
-      }
-    }
-
-    else if (s_rtp.dev == DW7912)
-    {
     }
 
     else if (s_rtp.dev == DW7914)
     {
+      /* step : check fifo */
+      i2c_read_task(g_i2c_id, 0x4D, I2C_8BIT, buf, 2, I2C_2MHZ);
+      fifo = _8u16(buf);
+
+      /* what if fifo is empty?*/
+      if (s_rtp.size[p] > s_rtp.cnt[p])
+      {
+        play = 2048 - fifo;
+
+        if (play > (s_rtp.size[p] - s_rtp.cnt[p]))
+        {
+          play = s_rtp.size[p] - s_rtp.cnt[p];
+        }
+
+        i2c_write_task(g_i2c_id, 0x0D, I2C_8BIT, ((u8 *)s_rtp.buf[p] + s_rtp.cnt[p]), play, I2C_2MHZ);
+        i2c_8bit_w(0x0C, 0x01);
+        s_rtp.cnt[p] += play;
+
+        if (s_rtp.size[p] == s_rtp.cnt[p])
+        {
+          p ^= 1;
+          echo = 0;
+          s_rtp.play--;
+          s_rtp.cnt[p] = 0;
+        }
+
+        /* hand shake */
+        if (echo == 0)
+        {
+          echo = 1;
+          _16u8(&s_rtp.cnt[p], s_upk.buf + 9);
+          uart_transfer_task(5);
+        }
+      }
     }
+  }
+  else
+  {
+    /* play end */
+    p = 0;
+    echo = 0;
+    s_bit.rtp_act = 0;
+    sys_timer_set(TIMER_7, STOP, 0);
+
+    /* for hand shake */
+    s_upk.buf[8] = 0xff;
+    uart_transfer_task(5);
   }
 
   return 0;
@@ -609,8 +733,6 @@ int play_rtp_task(void)
 
 /***************************************************************************
 Function	: main_func_state_machine
-Date      : 2021.08.12
-Editor		: JKS
 Version		: 1.0
 Descript 	: max packet 4kbyte
 ***************************************************************************/
@@ -618,24 +740,31 @@ static void main_func_state_machine(void)
 {
   if (s_bit.rx_done == 1)
   {
+    LED5(LEDON);
+
     switch (s_upk.buf[6])
     {
     case SYS_FSM:
       board_set_task();
       break;
+
     case I2C_FSM:
       i2c_task();
       break;
+
     case RTP_FSM:
       init_rtp_task();
       break;
     }
+
     s_bit.rx_done = 0;
+
+    LED5(LEDOF);
   }
 }
 
 /* USER CODE END 0 */
-u8 g_uart_rx_done = 0;
+
 /**
  * @brief  The application entry point.
  * @retval int
@@ -674,7 +803,6 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   MX_I2C1_Init();
-  MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
   init_redhoah_system();
   /* USER CODE END 2 */
@@ -847,7 +975,7 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.ClockSpeed = 400000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
@@ -874,51 +1002,6 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
-}
-
-/**
- * @brief I2C2 Initialization Function
- * @param None
- * @retval None
- */
-static void MX_I2C2_Init(void)
-{
-
-  /* USER CODE BEGIN I2C2_Init 0 */
-
-  /* USER CODE END I2C2_Init 0 */
-
-  /* USER CODE BEGIN I2C2_Init 1 */
-
-  /* USER CODE END I2C2_Init 1 */
-  hi2c2.Instance = I2C2;
-  hi2c2.Init.ClockSpeed = 400000;
-  hi2c2.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c2.Init.OwnAddress1 = 0;
-  hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c2.Init.OwnAddress2 = 0;
-  hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c2.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /** Configure Analogue filter
-   */
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c2, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /** Configure Digital filter
-   */
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c2, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C2_Init 2 */
-
-  /* USER CODE END I2C2_Init 2 */
 }
 
 /**
@@ -1183,7 +1266,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
@@ -1193,27 +1275,36 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_6, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_7, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_14, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3 | GPIO_PIN_4, GPIO_PIN_RESET);
-
-  /*Configure GPIO pins : PE2 PE3 */
-  GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  /*Configure GPIO pin : PF6 */
+  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB0 PB1 PB13 PB14
-                           PB15 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+  /*Configure GPIO pins : PB0 PB1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB13 PB14 PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
@@ -1224,62 +1315,48 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PD3 PD4 PD5 PD7 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_7;
+  /*Configure GPIO pins : PD0 PD1 PD3 PD4
+                           PD5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PG9 PG10 PG11 PG12
-                           PG13 PG14 */
-  GPIO_InitStruct.Pin = GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14;
+  /*Configure GPIO pins : PG11 PG12 PG14 */
+  GPIO_InitStruct.Pin = GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_14;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB3 PB4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3 | GPIO_PIN_4;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PB5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_5;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
-
-  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
 
 /* USER CODE BEGIN 4 */
 /***************************************************************************
 Function	: HAL_GPIO_EXTI_Callback
 Date		: 2021.08.12
-Editor		: JKS
-Version		: 1.0
-Descript 	: sw1, sw2 key
+Descript 	: sw1, sw2, sw3
 ***************************************************************************/
 void HAL_GPIO_EXTI_Callback(u16 GPIO_Pin)
 {
-  if (GPIO_Pin == GPIO_PIN_2)
+  if (GPIO_Pin == GPIO_PIN_14)
   {
-    /*user code here*/
-    LED5_T;
-    uart_transfer_task(2);
+    /*sw1 user code here*/
+    LED1_T;
   }
-  if (GPIO_Pin == GPIO_PIN_3)
+  else if (GPIO_Pin == GPIO_PIN_15)
   {
-    /*user code here*/
-    LED4_T;
+    /*sw2 user code here*/
+    LED2_T;
+  }
+  else if (GPIO_Pin == GPIO_PIN_13)
+  {
+    /*sw3 user code here*/
+    LED3_T;
   }
 }
 

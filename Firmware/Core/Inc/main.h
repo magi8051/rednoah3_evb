@@ -48,7 +48,7 @@ extern "C"
   typedef signed int s32;
 
   /*Boot Define*/
-#define REDNOAH_FW_INFO 0x22052300
+#define REDNOAH_FW_INFO 0x22060800
 #define REDNOAH_RESET SCB->AIRCR = 0x05FA0000 | 0x04
 #define REDNOAH_FLASH_20 ((u32)0x08180000)
 /* Packet Define */
@@ -57,8 +57,8 @@ extern "C"
 /*UART Define*/
 #define BHD6 6
 #define UART1_BUAD 921600 // 1Mbps
-#define LED_ON 0
-#define LED_OF 1
+#define LEDON 0
+#define LEDOF 1
 #define STOP 0xFF
 #define PLAY 0xCC
 #define RUN 0x11
@@ -68,46 +68,43 @@ extern "C"
 
 /*I2C Define*/
 #define I2C_400KHZ 20
-#define I2C_1MHZ 7
+#define I2C_1MHZ 5
 #define I2C_2MHZ 2
 #define I2C_3MHZ 0
 #define I2C_8BIT 1
 #define I2C_16BIT 2
 #define I2C_ACK 0
 
-/*hardware-dependent declaration for WBB*/
-#define BOOT_ID0 HAL_GPIO_ReadPin(GPIOG, GPIO_PIN_8)
-#define BOOT_ID1 HAL_GPIO_ReadPin(GPIOG, GPIO_PIN_13)
+/* BD ID */
+#define BOOT_ID0 HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_0)
+#define BOOT_ID1 HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1)
+#define BOOT_ID2 HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2)
 
+/* LED */
 #define LED5(in) HAL_GPIO_WritePin(GPIOG, GPIO_PIN_12, (GPIO_PinState)in)
 #define LED4(in) HAL_GPIO_WritePin(GPIOG, GPIO_PIN_11, (GPIO_PinState)in)
-#define LED3(in) HAL_GPIO_WritePin(GPIOG, GPIO_PIN_10, (GPIO_PinState)in)
-#define LED2(in) HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, (GPIO_PinState)in)
-#define LED1(in) HAL_GPIO_WritePin(GPIOD, GPIO_PIN_7, (GPIO_PinState)in)
-
-#define P0(in) HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, (GPIO_PinState)in)
-#define P1(in) HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, (GPIO_PinState)in)
-#define P2(in) HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, (GPIO_PinState)in)
-#define P3(in) HAL_GPIO_WritePin(GPIOC, GPIO_PIN_9, (GPIO_PinState)in)
-
-#define LED1_T HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_7)
-#define LED2_T HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_9)
-#define LED3_T HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_10)
+#define LED3(in) HAL_GPIO_WritePin(GPIOD, GPIO_PIN_5, (GPIO_PinState)in)
+#define LED2(in) HAL_GPIO_WritePin(GPIOD, GPIO_PIN_4, (GPIO_PinState)in)
+#define LED1(in) HAL_GPIO_WritePin(GPIOD, GPIO_PIN_3, (GPIO_PinState)in)
+#define LED1_T HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_3)
+#define LED2_T HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_4)
+#define LED3_T HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_5)
 #define LED4_T HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_11)
 #define LED5_T HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_12)
 
-#define LED6_T HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_11)
-#define LED7_T HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_12)
-#define LED8_T HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_13)
+/* KEY */
+#define KEY3 HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13)
+#define KEY2 HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_15)
+#define KEY1 HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14)
 
-#define P0_T HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6)
-#define P1_T HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_7)
-#define P2_T HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_8)
-#define P3_T HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_9)
-#define KEY2 HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_3)
-
+/* LDO */
 #define ADJ_LDO_EN(in) HAL_GPIO_WritePin(GPIOG, GPIO_PIN_14, (GPIO_PinState)in)
-#define LDO_EN(in) HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, (GPIO_PinState)in)
+
+/* SPI NSS */
+#define SPI3_NSS2(in) HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1, (GPIO_PinState)in)
+#define SPI3_NSS1(in) HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, (GPIO_PinState)in)
+#define SPI3_NSS0(in) HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, (GPIO_PinState)in)
+#define SPI5_NSS(in) HAL_GPIO_WritePin(GPIOF, GPIO_PIN6, (GPIO_PinState)in)
 
   /* USER CODE END ET */
 
@@ -172,12 +169,11 @@ extern "C"
   u32 _8u32(u8 *in);
   void _16u8(u16 *_u16, u8 *_u8);
 
-  int play_rtp_task(void);
-  int init_rtp_task(void);
   u8 i2c_8bit_r(u8 addr);
   u8 i2c_8bit_w(u8 addr, u8 data);
+  int play_rtp_task(void);
+  int init_rtp_task(void);
   void uart_transfer_task(u32 tx_size);
-  void echo_i2c_msg(u8 msg);
   static void i2c_task(void);
   static void sys_led_task(void);
   static void init_redhoah_system(void);
